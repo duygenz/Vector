@@ -1,149 +1,112 @@
-# main.py
-import uvicorn
-import feedparser
-import requests
-from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from sentence_transformers import SentenceTransformer
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-import logging
-
-# --- Cấu hình ---
-# Cấu hình logging để dễ dàng gỡ lỗi trên Render
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import feedparser
+import requests
+from typing import List
 
 # Khởi tạo ứng dụng FastAPI
 app = FastAPI(
-    title="Vietnam News Vector API",
-    description="API để lấy tin tức chứng khoán từ RSS, trích xuất nội dung và chuyển thành vector.",
+    title="News Vector API",
+    description="API để lấy tin tức từ các nguồn RSS và chuyển đổi thành vector.",
     version="1.0.0",
 )
 
-# Danh sách các nguồn RSS
+# Tải một mô hình nhẹ đã được tối ưu hóa.
+# 'all-MiniLM-L6-v2' là một mô hình tốt, cân bằng giữa tốc độ, kích thước và chất lượng.
+try:
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+except Exception as e:
+    # Xử lý lỗi nếu không tải được mô hình
+    model = None
+    print(f"Lỗi khi tải mô hình SentenceTransformer: {e}")
+
+
+# Danh sách các RSS feed của bạn
 RSS_FEEDS = [
     "https://vietstock.vn/830/chung-khoan/co-phieu.rss",
     "https://cafef.vn/thi-truong-chung-khoan.rss",
     "https://vietstock.vn/145/chung-khoan/y-kien-chuyen-gia.rss",
     "https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss",
-    "https://vietstock.vn/1328/dong-duong/thi-truong-chung-khoan.rss",
+,"https://vietstock.vn/1328/dong-duong/thi-truong-chung-khoan.rss",
 ]
 
-# Tải mô hình để vector hóa. Mô hình này hỗ trợ tốt tiếng Việt.
-# Lần đầu chạy sẽ mất chút thời gian để tải mô hình về.
-logger.info("Đang tải mô hình Sentence Transformer...")
-model = SentenceTransformer('keepitreal/vietnamese-sbert')
-logger.info("Tải mô hình thành công.")
+# Cache đơn giản để lưu trữ tin tức đã lấy
+# Giúp giảm số lần gọi đến RSS feed, tăng tốc độ phản hồi
+news_cache = {}
 
-# Khởi tạo công cụ chia nhỏ văn bản
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,  # Số ký tự mỗi đoạn
-    chunk_overlap=50  # Số ký tự chồng lấn giữa các đoạn
-)
-
-# --- Các hàm xử lý ---
-
-def scrape_article_content(url: str) -> str:
-    """
-    Truy cập URL bài viết và trích xuất nội dung văn bản chính.
-    LƯU Ý: Phần này có thể cần điều chỉnh vì cấu trúc HTML của mỗi trang web là khác nhau.
-    """
+def fetch_news_from_feed(feed_url: str) -> List[dict]:
+    """Hàm lấy và phân tích tin tức từ một RSS feed."""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        # Sử dụng ETag và Last-Modified để kiểm tra xem feed có được cập nhật không
+        headers = {}
+        if feed_url in news_cache:
+            if "etag" in news_cache[feed_url]:
+                headers['If-None-Match'] = news_cache[feed_url]['etag']
+            if "modified" in news_cache[feed_url]:
+                headers['If-Modified-Since'] = news_cache[feed_url]['modified']
+
+        response = requests.get(feed_url, headers=headers, timeout=10)
+
+        # Nếu feed không thay đổi, trả về dữ liệu từ cache
+        if response.status_code == 304:
+            return news_cache[feed_url]['entries']
+
+        # Phân tích cú pháp feed
+        parsed_feed = feedparser.parse(response.content)
+
+        # Cập nhật cache
+        news_cache[feed_url] = {
+            'entries': parsed_feed.entries,
+            'etag': response.headers.get('ETag'),
+            'modified': response.headers.get('Last-Modified')
         }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status() # Báo lỗi nếu request không thành công
+        return parsed_feed.entries
 
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Thử các selector khác nhau cho từng trang
-        if 'vietstock.vn' in url:
-            content_div = soup.find('div', id='content')
-        elif 'cafef.vn' in url:
-            content_div = soup.find('div', class_='content-detail')
-        else:
-            # Selector chung chung nếu không khớp
-            content_div = soup.find('article') or soup.find('div', class_='content')
-
-        if content_div:
-            # Loại bỏ các thẻ không cần thiết như script, style
-            for tag in content_div(['script', 'style', 'a', 'figure']):
-                tag.decompose()
-            return content_div.get_text(separator=' ', strip=True)
-        return ""
     except requests.RequestException as e:
-        logger.error(f"Lỗi khi truy cập url {url}: {e}")
-        return ""
+        print(f"Lỗi khi lấy tin từ {feed_url}: {e}")
+        return []
 
-# --- Định nghĩa API Endpoint ---
-
-@app.get(
-    "/api/news-vectors",
-    summary="Lấy tin tức và vector hóa nội dung",
-    description="Lấy tối đa 5 bài viết mới nhất từ mỗi nguồn RSS, trích xuất toàn bộ nội dung, chia nhỏ và tạo vector cho từng đoạn."
-)
-def get_news_with_vectors():
+@app.get("/news-vectors/", summary="Lấy tin tức dưới dạng vector")
+async def get_news_vectors():
     """
-    Điểm cuối API chính để xử lý và trả về dữ liệu.
+    Endpoint này lấy tin tức mới nhất từ tất cả các nguồn RSS,
+    chuyển đổi tiêu đề và mô tả của chúng thành vector nhúng (embeddings).
     """
-    all_articles_data = []
+    if not model:
+        raise HTTPException(status_code=503, detail="Mô hình NLP hiện không khả dụng.")
 
+    all_news = []
     for feed_url in RSS_FEEDS:
-        try:
-            logger.info(f"Đang xử lý nguồn RSS: {feed_url}")
-            feed = feedparser.parse(feed_url)
+        entries = fetch_news_from_feed(feed_url)
+        for entry in entries:
+            # Chỉ lấy các thông tin cần thiết
+            news_item = {
+                "title": entry.get("title", ""),
+                "link": entry.get("link", ""),
+                "summary": entry.get("summary", ""),
+                "published": entry.get("published", "")
+            }
+            all_news.append(news_item)
 
-            # Giới hạn xử lý 5 bài viết đầu tiên trên mỗi nguồn để API phản hồi nhanh
-            for entry in feed.entries[:5]:
-                title = entry.get('title', 'Không có tiêu đề')
-                link = entry.get('link')
-                published = entry.get('published', 'Không có ngày xuất bản')
-                source = feed.feed.get('title', 'Không rõ nguồn')
+    if not all_news:
+        return {"message": "Không có tin tức nào được tìm thấy.", "vectors": []}
 
-                if not link:
-                    continue
+    # Tạo nội dung để chuyển đổi thành vector (kết hợp tiêu đề và tóm tắt)
+    texts_to_embed = [f"{news['title']}. {news['summary']}" for news in all_news]
 
-                logger.info(f"Đang trích xuất nội dung từ: {link}")
-                full_content = scrape_article_content(link)
+    # Chuyển đổi thành vector
+    embeddings = model.encode(texts_to_embed, convert_to_tensor=False).tolist()
 
-                if not full_content:
-                    logger.warning(f"Không lấy được nội dung cho bài viết: {title}")
-                    continue
+    # Kết hợp thông tin tin tức với vector tương ứng
+    vectorized_news = []
+    for i, news_item in enumerate(all_news):
+        news_item['vector'] = embeddings[i]
+        vectorized_news.append(news_item)
 
-                # Chia nhỏ văn bản
-                chunks = text_splitter.split_text(full_content)
+    return {"news": vectorized_news}
 
-                # Vector hóa từng đoạn
-                # batch_size giúp xử lý hiệu quả hơn nếu có nhiều đoạn
-                logger.info(f"Đang vector hóa {len(chunks)} đoạn văn bản...")
-                vectors = model.encode(chunks).tolist() # Chuyển thành list để serialize JSON
+@app.get("/", summary="Endpoint kiểm tra trạng thái")
+def read_root():
+    """Endpoint gốc để kiểm tra xem API có hoạt động không."""
+    return {"status": "API đang hoạt động"}
 
-                article_data = {
-                    "source": source,
-                    "title": title,
-                    "link": link,
-                    "published": published,
-                    "content_chunks": [],
-                }
-
-                for i, chunk in enumerate(chunks):
-                    article_data["content_chunks"].append({
-                        "chunk_text": chunk,
-                        "vector": vectors[i]
-                    })
-
-                all_articles_data.append(article_data)
-
-        except Exception as e:
-            logger.error(f"Lỗi khi xử lý nguồn {feed_url}: {e}")
-            # Bỏ qua nguồn bị lỗi và tiếp tục với nguồn khác
-            continue
-
-    if not all_articles_data:
-        raise HTTPException(status_code=404, detail="Không thể lấy được bài viết nào từ các nguồn RSS.")
-
-    return {"articles": all_articles_data}
-
-# Lệnh để chạy server local (dùng để kiểm thử):
-# uvicorn main:app --reload
