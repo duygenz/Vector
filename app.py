@@ -1,56 +1,75 @@
-import uvicorn
-from fastapi import FastAPI
-from sentence_transformers import SentenceTransformer
 import feedparser
-import asyncio
+from flask import Flask, jsonify
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+import gunicorn # Mặc dù không import trực tiếp, cần có trong requirements.txt
 
-# List of your RSS feeds
+# Khởi tạo ứng dụng Flask
+app = Flask(__name__)
+
+# Danh sách các nguồn RSS của bạn
 RSS_FEEDS = [
-    "https://vietstock.vn/830/chung-khoan/co-phieu.rss",
-    "https://cafef.vn/thi-truong-chung-khoan.rss",
-    "https://vietstock.vn/145/chung-khoan/y-kien-chuyen-gia.rss",
-    "https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss",
-    "https://vietstock.vn/1328/dong-duong/thi-truong-chung-khoan.rss"
+    'https://vietstock.vn/830/chung-khoan/co-phieu.rss',
+    'https://cafef.vn/thi-truong-chung-khoan.rss',
+    'https://vietstock.vn/145/chung-khoan/y-kien-chuyen-gia.rss',
+    'https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss',
+    'https://vietstock.vn/1328/dong-duong/thi-truong-chung-khoan.rss'
 ]
 
-# Initialize the FastAPI app
-app = FastAPI()
-
-# Load a lightweight model for creating vectors.
-# 'all-MiniLM-L6-v2' is a good balance of size and performance.
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-def fetch_and_parse_feeds():
-    """Fetches news items from all RSS feeds."""
-    all_entries = []
-    for url in RSS_FEEDS:
-        feed = feedparser.parse(url)
-        all_entries.extend(feed.entries)
-    return all_entries
-
-@app.get("/news-vectors")
-async def get_news_vectors():
+def get_news_and_vectors():
     """
-    API endpoint to get news articles as vectors.
+    Hàm lấy tin tức từ các nguồn RSS và chuyển đổi tiêu đề thành vector TF-IDF.
     """
-    # Fetch the latest news
-    articles = fetch_and_parse_feeds()
+    all_news = []
+    titles = []
 
-    # Prepare data for vectorization (e.g., using titles)
-    titles = [entry.title for entry in articles]
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+        for entry in feed.entries:
+            # Thu thập các thông tin cần thiết
+            news_item = {
+                'title': entry.get('title', 'N/A'),
+                'link': entry.get('link', '#'),
+                'published': entry.get('published', 'N/A'),
+                'summary': entry.get('summary', 'N/A'),
+                'source': feed.feed.title
+            }
+            all_news.append(news_item)
+            titles.append(entry.get('title', ''))
 
-    # Generate vectors
-    vectors = model.encode(titles)
+    # Kiểm tra xem có tin tức nào không
+    if not titles:
+        return []
 
-    # Combine titles with their vectors
-    response_data = [
-        {"title": title, "vector": vector.tolist()}
-        for title, vector in zip(titles, vectors)
-    ]
+    # Tạo vector từ tiêu đề tin tức bằng TF-IDF
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(titles)
 
-    return {"news": response_data}
+    # Thêm vector vào mỗi mục tin tức
+    for i, news_item in enumerate(all_news):
+        # Chuyển vector thưa thành mảng numpy dày và chuyển thành list để có thể JSON hóa
+        vector = tfidf_matrix[i].toarray().flatten().tolist()
+        news_item['vector'] = vector
 
-if __name__ == "__main__":
-    # This part is for local testing, not for Render
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return all_news
 
+@app.route('/news')
+def get_news():
+    """
+    API endpoint để lấy danh sách tin tức cùng với vector.
+    """
+    news_with_vectors = get_news_and_vectors()
+    if not news_with_vectors:
+        return jsonify({"error": "Không thể lấy tin tức"}), 500
+    return jsonify(news_with_vectors)
+
+@app.route('/')
+def home():
+    """
+    Trang chủ đơn giản để kiểm tra API có hoạt động không.
+    """
+    return "API tin tức vector đang hoạt động! Truy cập /news để xem dữ liệu."
+
+if __name__ == '__main__':
+    # Chạy ứng dụng (chỉ dùng cho môi trường phát triển local)
+    app.run(debug=True)
