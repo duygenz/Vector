@@ -1,9 +1,5 @@
-# requirements.txt
 fastapi
-uvicorn
+uvicorn[standard]
+sentence-transformers
 feedparser
 requests
-beautifulsoup4
-sentence-transformers
-langchain
-lxml
