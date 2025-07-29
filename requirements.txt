@@ -1,5 +1,7 @@
-Flask
+fastapi
+uvicorn[standard]
+requests
 feedparser
-scikit-learn
-numpy
-gunicorn
+sentence-transformers
+beautifulsoup4
+lxml
