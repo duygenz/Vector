@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: vector
-    env: python
-    plan: free # Sử dụng gói miễn phí của Render
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app"
-    healthCheckPath: /
