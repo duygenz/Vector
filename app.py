@@ -1,75 +1,1 @@
-import feedparser
-from flask import Flask, jsonify
-from sklearn.feature_extraction.text import TfidfVectorizer
-import numpy as np
-import gunicorn # Mặc dù không import trực tiếp, cần có trong requirements.txt
-
-# Khởi tạo ứng dụng Flask
-app = Flask(__name__)
-
-# Danh sách các nguồn RSS của bạn
-RSS_FEEDS = [
-    'https://vietstock.vn/830/chung-khoan/co-phieu.rss',
-    'https://cafef.vn/thi-truong-chung-khoan.rss',
-    'https://vietstock.vn/145/chung-khoan/y-kien-chuyen-gia.rss',
-    'https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss',
-    'https://vietstock.vn/1328/dong-duong/thi-truong-chung-khoan.rss'
-]
-
-def get_news_and_vectors():
-    """
-    Hàm lấy tin tức từ các nguồn RSS và chuyển đổi tiêu đề thành vector TF-IDF.
-    """
-    all_news = []
-    titles = []
-
-    for feed_url in RSS_FEEDS:
-        feed = feedparser.parse(feed_url)
-        for entry in feed.entries:
-            # Thu thập các thông tin cần thiết
-            news_item = {
-                'title': entry.get('title', 'N/A'),
-                'link': entry.get('link', '#'),
-                'published': entry.get('published', 'N/A'),
-                'summary': entry.get('summary', 'N/A'),
-                'source': feed.feed.title
-            }
-            all_news.append(news_item)
-            titles.append(entry.get('title', ''))
-
-    # Kiểm tra xem có tin tức nào không
-    if not titles:
-        return []
-
-    # Tạo vector từ tiêu đề tin tức bằng TF-IDF
-    vectorizer = TfidfVectorizer()
-    tfidf_matrix = vectorizer.fit_transform(titles)
-
-    # Thêm vector vào mỗi mục tin tức
-    for i, news_item in enumerate(all_news):
-        # Chuyển vector thưa thành mảng numpy dày và chuyển thành list để có thể JSON hóa
-        vector = tfidf_matrix[i].toarray().flatten().tolist()
-        news_item['vector'] = vector
-
-    return all_news
-
-@app.route('/news')
-def get_news():
-    """
-    API endpoint để lấy danh sách tin tức cùng với vector.
-    """
-    news_with_vectors = get_news_and_vectors()
-    if not news_with_vectors:
-        return jsonify({"error": "Không thể lấy tin tức"}), 500
-    return jsonify(news_with_vectors)
-
-@app.route('/')
-def home():
-    """
-    Trang chủ đơn giản để kiểm tra API có hoạt động không.
-    """
-    return "API tin tức vector đang hoạt động! Truy cập /news để xem dữ liệu."
-
-if __name__ == '__main__':
-    # Chạy ứng dụng (chỉ dùng cho môi trường phát triển local)
-    app.run(debug=True)
+# -*- coding: utf-8 -*- import feedparser from flask import Flask, jsonify, request # Thêm 'request' from sklearn.feature_extraction.text import TfidfVectorizer import numpy as np import gunicorn   # Khởi tạo ứng dụng Flask app = Flask(__name__)  # Danh sách các nguồn RSS của bạn RSS_FEEDS = [     'https://vietstock.vn/830/chung-khoan/co-phieu.rss',     'https://cafef.vn/thi-truong-chung-khoan.rss',     'https://vietstock.vn/145/chung-khoan/y-kien-chuyen-gia.rss',     'https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss',     'https://vietstock.vn/1328/dong-duong/thi-truong-chung-khoan.rss' ]  # Biến toàn cục để lưu trữ cache và vectorizer # Sẽ được khởi tạo một lần khi ứng dụng bắt đầu news_cache = [] vectorizer = None  def initialize_news_and_vectorizer():     """     Hàm này chỉ chạy một lần khi server khởi động.     Nó lấy tin tức từ các nguồn RSS, sau đó "fit" (huấn luyện) TfidfVectorizer     với tiêu đề của các tin tức đó và lưu trữ kết quả.     """     global news_cache, vectorizer          print("Initializing news and vectorizer...")     all_news = []     titles = []      for feed_url in RSS_FEEDS:         try:             feed = feedparser.parse(feed_url)             for entry in feed.entries:                 news_item = {                     'title': entry.get('title', 'N/A'),                     'link': entry.get('link', '#'),                     'published': entry.get('published', 'N/A'),                     'summary': entry.get('summary', 'N/A'),                     'source': feed.feed.title                 }                 all_news.append(news_item)                 titles.append(entry.get('title', ''))         except Exception as e:             print(f"Could not parse feed {feed_url}: {e}")      if not titles:         print("Warning: No titles found to initialize vectorizer.")         return      # Khởi tạo và fit vectorizer với toàn bộ tiêu đề     vectorizer = TfidfVectorizer()     tfidf_matrix = vectorizer.fit_transform(titles)      # Thêm vector TF-IDF đã được tính toán vào mỗi tin tức     for i, news_item in enumerate(all_news):         # Chuyển vector thưa thành mảng numpy dày và chuyển thành list để có thể JSON hóa         vector = tfidf_matrix[i].toarray().flatten().tolist()         news_item['vector'] = vector      news_cache = all_news     print(f"Initialization complete. {len(news_cache)} articles cached. Vectorizer is ready.")   @app.route('/news') def get_news():     """     API endpoint để lấy danh sách tin tức cùng với vector đã được tính toán sẵn.     """     if not news_cache:         return jsonify({"error": "News cache is empty or not initialized"}), 500     return jsonify(news_cache)  # ================================================================= # === ENDPOINT MỚI ĐỂ VECTOR HÓA CÂU HỎI (NÂNG CẤP QUAN TRỌNG) === # ================================================================= @app.route('/vectorize', methods=['POST']) def vectorize_text():     """     Nhận một đối tượng JSON chứa văn bản (ví dụ: {"text": "câu hỏi của người dùng"})     và trả về vector TF-IDF tương ứng được tạo ra từ vectorizer đã được huấn luyện.     """     global vectorizer     if vectorizer is None:         return jsonify({"error": "Vectorizer not initialized"}), 500      data = request.get_json()     if not data or 'text' not in data:         return jsonify({"error": "Yêu cầu phải chứa khóa 'text' trong body"}), 400      text_to_vectorize = [data['text']]     try:         # Dùng vectorizer đã được fit để "transform" (biến đổi) văn bản mới         # Điều này đảm bảo vector mới có cùng chiều và hệ quy chiếu với các vector tin tức         vector = vectorizer.transform(text_to_vectorize).toarray().flatten().tolist()         return jsonify({"vector": vector})     except Exception as e:         return jsonify({"error": str(e)}), 500   @app.route('/') def home():     """     Trang chủ đơn giản để kiểm tra API có hoạt động không.     """     return "Vector News API is running! Access /news to get data."  # Chạy hàm khởi tạo ngay khi ứng dụng được tải initialize_news_and_vectorizer()  if __name__ == '__main__':     # Khi chạy local, Flask sẽ tự động khởi động lại khi có thay đổi mã nguồn,     # và hàm initialize_news_and_vectorizer() sẽ được gọi lại.     app.run(debug=True) 
